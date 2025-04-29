@@ -1,0 +1,38 @@
+{
+  "compilerOptions": {
+    /* Base Options: */
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "target": "ES2022", // Use a recent ES version
+    "allowJs": true, // Allow JavaScript files to be compiled (useful during transition)
+    "resolveJsonModule": true,
+    "moduleDetection": "force",
+    "isolatedModules": true, // Required by some build tools
+
+    /* Strictness */
+    "strict": true,
+    "noUncheckedIndexedAccess": true, // Recommended for stricter checks
+    "noImplicitAny": true, // Raise error on expressions and declarations with an implied 'any' type.
+
+    /* If NOT transpiling with TypeScript: */
+    "moduleResolution": "NodeNext", // Use Node.js's module resolution strategy
+    "module": "NodeNext", // Use Node.js's module system
+
+    /* If your code runs in the DOM: */
+    // "lib": ["es2022", "dom", "dom.iterable"],
+
+    /* If your code doesn't run in the DOM: */
+     "lib": ["es2022"], // Target ES2022 library features
+
+    /* Output */
+    "outDir": "./dist", // Output directory for compiled files
+    "rootDir": "./src", // Root directory of source files
+    "declaration": true, // Generate corresponding '.d.ts' file.
+    "sourceMap": true, // Generate corresponding '.map' file.
+
+    /* Other */
+    "forceConsistentCasingInFileNames": true // Disallow inconsistently-cased references to the same file.
+  },
+  "include": ["src/**/*"], // Specifies an array of filenames or patterns to include in the program
+  "exclude": ["node_modules", "dist"] // Specifies an array of filenames or patterns that should be skipped
+} 
