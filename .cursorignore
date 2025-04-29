@@ -1,0 +1,14 @@
+# Version Control
+.git/
+
+# Dependencies
+node_modules/
+venv/
+vendor/
+
+# Build Output
+build/
+dist/
+
+# Caches
+.cursor-cache/ 

@@ -1,0 +1,33 @@
+{
+  "name": "codenexus-mcp",
+  "version": "1.0.1",
+  "description": "A Model Context Protocol server for code-related operations",
+  "main": "server.js",
+  "type": "module",
+  "bin": {
+    "codenexus-mcp": "./server.js"
+  },
+  "files": [
+    "server.js",
+    "README.md",
+    "LICENSE" 
+  ],
+  "scripts": {
+    "start": "node server.js",
+    "debug": "node server.js --debug",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ai",
+    "llm",
+    "code"
+  ],
+  "author": "Jignesh Suvariya",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.10.1",
+    "zod": "^3.22.4"
+  }
+}
