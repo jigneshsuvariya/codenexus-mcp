@@ -1,0 +1,10 @@
+{
+  "options": {
+    "type": "mixed",
+    "multi": true,
+    "allowSelfLoops": true
+  },
+  "attributes": {},
+  "nodes": [],
+  "edges": []
+}

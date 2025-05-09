@@ -1,20 +1,20 @@
 #!/usr/bin/env node
 
-import { Server, ServerOptions } from "@modelcontextprotocol/sdk/server/index.js";
+// Use McpServer for higher-level abstraction
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+// import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+
+// --- Import necessary types and server components based on filesystem example ---
+// import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-  CallToolRequest,
-  McpError,
-  Tool, // Import Tool type
-} from "@modelcontextprotocol/sdk/types.js";
-import { promises as fs } from 'fs';
-import path from 'path';
+import { } from "@modelcontextprotocol/sdk/types.js";
+import * as path from 'path';
 import { fileURLToPath } from 'url';
-import crypto from 'crypto'; // Import crypto for UUID generation
-import { Entity, Relation, KnowledgeGraph, Observation, AddObservationInput, AddObservationResult, DeleteObservationInput } from './types.js'; // Import the new types
-import { z, ZodError } from 'zod'; // Import Zod and ZodError
+// Removed unused imports for old KnowledgeGraph, Observation, etc.
+// Import only the needed new types explicitly
+import { z } from 'zod'; // Import Zod and ZodError
+import { GraphologyManager } from './graphologyManager.js'; // <-- Import the new manager
+import type { NodeAttributes } from './types.js';
 
 /**
  * @typedef {Object} Observation
@@ -137,6 +137,7 @@ const RelationSchema = z.object({
 const KnowledgeGraphSchema = z.object({
   entities: z.array(EntitySchema).describe("List of entities in the graph"),
   relations: z.array(RelationSchema).describe("List of relations in the graph"),
+  // Note: Graphology export might have a different structure. Adjust if needed.
 });
 
 // Schema for generic success message output
@@ -144,954 +145,459 @@ const SuccessMessageSchema = z.object({
     content: z.array(z.object({ type: z.literal("text"), text: z.string() })).length(1)
 }).describe("Standard success message structure");
 
-// Schemas for tool inputs/outputs
+// Define Zod schemas for graphology-based operations (adjusting input/output)
+// Use the imported types for better clarity if possible, though Zod defines the runtime shape.
+const NodeAttributesSchema = z.record(z.any()).describe("Arbitrary attributes for a node/entity.");
+const EdgeAttributesSchema = z.record(z.any()).describe("Arbitrary attributes for an edge/relation.");
+
+// Adjusted Schemas using imported types where applicable for description/intent
+// Actual validation relies on the Zod structure defined here.
 
 const CreateEntitiesInputSchema = z.object({
-    entities: z.array(EntitySchema.omit({ type: true, observations: true }).partial().merge(z.object({
-        name: z.string(),
-        entityType: z.string(),
-        observations: z.array(
-            ObservationSchema.omit({ id: true }).partial().merge(z.object({
-                observationType: z.string(),
-                content: z.string()
-            }))
-        ).optional()
-    })))
-        .describe("Array of partial entity objects to create. 'name' and 'entityType' are required. Nested 'observations' require 'observationType' and 'content'.")
+    entities: z.array(z.object({
+        id: z.string().describe("Unique ID for the entity node."),
+        type: z.string().describe("The type of the entity (e.g., 'class', 'function', 'file')."),
+        // Use Partial<NodeAttributes> equivalent in Zod
+        attributes: NodeAttributesSchema.optional().describe("Additional attributes for the entity.")
+    })).describe("Array of entities (EntityInput) to create or update.")
 });
-const CreateEntitiesOutputSchema = z.object({ content: z.array(z.object({ type: z.literal("text"), text: z.string() })) });
+
+const CreateEntitiesOutputSchema = z.object({
+    createdIds: z.array(z.string()).describe("IDs of newly created entities."),
+    existingIds: z.array(z.string()).describe("IDs of entities that already existed (attributes may have been merged).")
+});
 
 const CreateRelationsInputSchema = z.object({
-    relations: z.array(RelationSchema.omit({ type: true }).partial().merge(z.object({ from: z.string(), to: z.string(), relationType: z.string() })))
-        .describe("Array of partial relation objects to create. 'from', 'to', and 'relationType' are required.")
+    relations: z.array(z.object({
+        id: z.string().describe("Unique ID for the relation edge."),
+        source: z.string().describe("ID of the source node."),
+        target: z.string().describe("ID of the target node."),
+        type: z.string().describe("The type of the relation (e.g., 'calls', 'contains')."),
+        // Use Partial<EdgeAttributes> equivalent in Zod
+        attributes: EdgeAttributesSchema.optional().describe("Additional attributes for the relation.")
+    })).describe("Array of relations (RelationInput) to create.")
 });
-const CreateRelationsOutputSchema = z.object({ content: z.array(z.object({ type: z.literal("text"), text: z.string() })) }); // Output is stringified JSON array of created relations
 
-const AddObservationsInputSchema = z.object({
-    observationsInput: z.array(z.object({
-        entityName: z.string().describe("Name of the entity to add observations to"),
-        observationsToAdd: z.array(ObservationSchema.omit({ id: true }).partial().merge(z.object({ observationType: z.string(), content: z.string()})))
-            .describe("Array of partial observation objects to add. 'observationType' and 'content' are required. 'id' is ignored/generated.")
-    }))
+const CreateRelationsOutputSchema = z.object({
+    createdKeys: z.array(z.string()).describe("Keys (IDs) of newly created relations."),
+    errors: z.array(z.string()).describe("Error messages for relations that could not be created (e.g., missing nodes, duplicate ID)." )
+});
+
+const CreateObservationsInputSchema = z.object({
+    // Changed from 'observationsInput' to 'observations' for consistency
+    observations: z.array(z.object({
+        id: z.string().describe("Unique ID for the observation node."),
+        content: z.string().describe("The textual content of the observation."),
+        relatedEntityIds: z.array(z.string()).describe("IDs of entities this observation relates to."),
+        tags: z.array(z.string()).optional().describe("Optional tags for categorization."),
+        // Use Partial<NodeAttributes> equivalent in Zod (Observation nodes are still nodes)
+        attributes: NodeAttributesSchema.optional().describe("Additional attributes for the observation node.")
+    })).describe("Array of observations (ObservationInput) to create.")
+});
+
+const CreateObservationsOutputSchema = z.object({
+    createdIds: z.array(z.string()).describe("IDs of newly created observation nodes.")
+});
+
+const ReadGraphInputSchema = z.object({
+    filter: z.object({
+        types: z.array(z.string()).optional().describe("Filter nodes by type (e.g., ['function', 'class'])."),
+        attributes: z.record(z.any()).optional().describe("Filter nodes by matching attribute key-value pairs."),
+        nodeIds: z.array(z.string()).optional().describe("Return only nodes with these specific IDs (and edges between them).")
+    }).optional().describe("Optional filters to apply to the graph retrieval.")
+}).describe("Input for reading the graph, allows optional filtering.");
+
+// Define ReadGraphOutputSchema directly with the expected structure
+const ReadGraphOutputSchema = z.object({
+    nodes: z.array(z.object({
+        id: z.string(),
+        attributes: NodeAttributesSchema // Use the z.record schema here
+    })).describe("List of nodes matching the filter (or all nodes if no filter)."),
+    edges: z.array(z.object({
+        id: z.string(),
+        source: z.string(),
+        target: z.string(),
+        attributes: EdgeAttributesSchema // Use the z.record schema here
+    })).describe("List of edges connecting the returned nodes.")
+});
+
+const UpdateEntitiesInputSchema = z.object({
+    updates: z.array(z.object({
+        id: z.string().describe("ID of the entity node to update."),
+        attributes: NodeAttributesSchema.describe("Attributes to merge into the existing node. Keys provided will overwrite existing values.")
+    })).describe("Array of updates to apply to existing entities.")
+});
+
+const UpdateEntitiesOutputSchema = z.object({
+    updatedIds: z.array(z.string()).describe("IDs of entities that were successfully updated."),
+    notFoundIds: z.array(z.string()).describe("IDs of entities that were not found.")
 });
 const AddObservationsOutputSchema = z.object({ content: z.array(z.object({ type: z.literal("text"), text: z.string() })) }); // Output is stringified JSON array of results
 
 const DeleteEntitiesInputSchema = z.object({
-    entityNames: z.array(z.string()).describe("Array of names of the entities to delete.")
+    ids: z.array(z.string()).describe("Array of IDs of the entity nodes to delete.")
 });
 // Output is SuccessMessageSchema
 
-const DeleteObservationsInputSchema = z.object({
-    deletions: z.array(z.object({
-        entityName: z.string().describe("Name of the entity to delete observations from."),
-        observationIds: z.array(z.string().uuid()).describe("Array of UUIDs of the observations to delete.")
-    }))
+const DeleteEntitiesOutputSchema = z.object({
+    deletedIds: z.array(z.string()).describe("IDs of entities that were successfully deleted."),
+    notFoundIds: z.array(z.string()).describe("IDs of entities that were not found.")
 });
 // Output is SuccessMessageSchema
 
 const DeleteRelationsInputSchema = z.object({
-    relations: z.array(RelationSchema.omit({ type: true }).partial().merge(z.object({ from: z.string(), to: z.string(), relationType: z.string() })))
-        .describe("Array of partial relation objects identifying relations to delete. 'from', 'to', and 'relationType' are required.")
+    keys: z.array(z.string()).describe("Array of keys (IDs) of the relation edges to delete.")
+});
+
+const DeleteRelationsOutputSchema = z.object({
+    deletedKeys: z.array(z.string()).describe("Keys of relations that were successfully deleted."),
+    notFoundKeys: z.array(z.string()).describe("Keys of relations that were not found.")
+});
+
+// New tool schema
+const AnalyzeCodebaseInputSchema = z.object({
+    filePaths: z.array(z.string()).describe("An array of file paths or glob patterns to analyze and add to the knowledge graph.")
+});
+
+const AnalyzeCodebaseOutputSchema = z.object({
+    analyzedFiles: z.number().int().describe("Number of files matched and analyzed."),
+    entitiesCreated: z.number().int().describe("Number of new entity nodes created in the graph."),
+    relationsCreated: z.number().int().describe("Number of new relation edges created in the graph (e.g., 'contains').")
+});
+
+// Schemas for query_graph_advanced tool (Task 9d)
+const QueryGraphAdvancedInputSchema = z.object({
+    query_type: z.enum(["traversal", "shortest_path"]).describe("The main mode of operation."),
+    start_node_ids: z.array(z.string()).optional().describe("IDs of nodes to begin traversal/search. Required for 'traversal'. First ID is source for 'shortest_path'."),
+    target_node_id: z.string().optional().describe("ID of the target node. Required for 'shortest_path'."),
+    traversal_options: z.object({
+        algorithm: z.enum(["bfs", "dfs"]).default("bfs").describe("Traversal algorithm."),
+        max_depth: z.number().int().positive().default(3).describe("Maximum traversal depth."),
+        direction: z.enum(["outgoing", "incoming", "any"]).default("outgoing").describe("Edge direction to follow."),
+        edge_types_filter: z.array(z.string()).optional().describe("Filter traversal by these edge types (e.g., relationType).")
+    }).optional().describe("Options applicable if query_type is 'traversal'."),
+    node_conditions: z.array(z.object({
+        attribute: z.string().describe("Node attribute to filter on."),
+        operator: z.enum(["equals", "contains", "startsWith", "regex", "in_array"]).describe("Operator for the condition."),
+        value: z.any().describe("Value to compare against.")
+    })).optional().describe("Conditions to filter nodes in the result set."),
+    edge_conditions: z.array(z.object({
+        attribute: z.string().describe("Edge attribute to filter on."),
+        operator: z.enum(["equals", "contains", "startsWith", "regex", "in_array"]).describe("Operator for the condition."),
+        value: z.any().describe("Value to compare against.")
+    })).optional().describe("Conditions to filter edges in the result set."),
+    result_options: z.object({
+        composition: z.enum(["nodes_only", "nodes_and_edges", "paths"]).default("nodes_and_edges").describe("Specifies the structure of the output.")
+        // include_attributes: z.array(z.string()).optional().describe("Specific attributes to return (omitted for now, returns all).")
+    }).optional().describe("Options for structuring the result.")
 });
 // Output is SuccessMessageSchema
 
-const ReadGraphInputSchema = z.object({}).describe("No input arguments required.");
-const ReadGraphOutputSchema = z.object({ content: z.array(z.object({ type: z.literal("text"), text: z.string() })) }); // Output is stringified JSON KnowledgeGraph
+const QueryGraphAdvancedOutputSchema = z.object({
+    query_type: z.string().describe("Echoed query_type from input."), // Echo the query type for clarity
+    nodes: z.array(z.object({ id: z.string(), attributes: NodeAttributesSchema })).optional().describe("Resulting nodes."),
+    edges: z.array(z.object({ id: z.string(), source: z.string(), target: z.string(), attributes: EdgeAttributesSchema })).optional().describe("Resulting edges."),
+    paths: z.array(z.object({
+        nodes: z.array(z.object({ id: z.string(), attributes: NodeAttributesSchema })),
+        edges: z.array(z.object({ id: z.string(), source: z.string(), target: z.string(), attributes: EdgeAttributesSchema }))
+        // cost: z.number().optional() // Add cost if calculating for shortest_path
+    })).optional().describe("Resulting paths (e.g., for shortest_path or specific traversal results)."),
+    path: z.object({
+        nodes: z.array(z.object({ id: z.string(), attributes: NodeAttributesSchema })),
+        edges: z.array(z.object({ id: z.string(), source: z.string(), target: z.string(), attributes: EdgeAttributesSchema })),
+        cost: z.number().optional().describe("Cost of the shortest path, if applicable.")
+    }).optional().describe("Single resulting path (primarily for shortest_path query_type).")
+    // error: z.string().optional().describe("Error message if the query failed.") // Consider adding error field
+});
 
+// Keep old search/open schemas for now, might need refactoring later
 const SearchNodesInputSchema = z.object({
     query: z.string().describe("The search query string.")
 });
-const SearchNodesOutputSchema = z.object({ content: z.array(z.object({ type: z.literal("text"), text: z.string() })) }); // Output is stringified JSON KnowledgeGraph
-
 const OpenNodesInputSchema = z.object({
     names: z.array(z.string()).describe("Array of entity names to retrieve.")
 });
-const OpenNodesOutputSchema = z.object({ content: z.array(z.object({ type: z.literal("text"), text: z.string() })) }); // Output is stringified JSON KnowledgeGraph
 
-// The KnowledgeGraphManager class contains all operations to interact with the knowledge graph
-class KnowledgeGraphManager {
-  memoryPath: string; // Declare memoryPath property
+// Define types for inferred schemas in module scope
+type CreateEntitiesInputType = z.infer<typeof CreateEntitiesInputSchema>;
+type CreateRelationsInputType = z.infer<typeof CreateRelationsInputSchema>;
+type CreateObservationsInputType = z.infer<typeof CreateObservationsInputSchema>;
+type ReadGraphInputType = z.infer<typeof ReadGraphInputSchema>;
+type UpdateEntitiesInputType = z.infer<typeof UpdateEntitiesInputSchema>;
+type DeleteEntitiesInputType = z.infer<typeof DeleteEntitiesInputSchema>;
+type DeleteRelationsInputType = z.infer<typeof DeleteRelationsInputSchema>;
+type AnalyzeCodebaseInputType = z.infer<typeof AnalyzeCodebaseInputSchema>;
+type QueryGraphAdvancedInputType = z.infer<typeof QueryGraphAdvancedInputSchema>;
+type SearchNodesInputType = z.infer<typeof SearchNodesInputSchema>;
+type OpenNodesInputType = z.infer<typeof OpenNodesInputSchema>;
+
+// ---------------- KnowledgeGraphManager (Moved to Module Scope) ------------------
+/**
+ * Manages the knowledge graph persistence and high-level operations.
+ * Delegates graph manipulation and persistence to GraphologyManager.
+ */
+export class KnowledgeGraphManager {
+    private graphManager: GraphologyManager;
+    // Rename graphFilePath to memoryPath for clarity based on env var name
+    private readonly memoryPath: string; 
 
   constructor() {
-    // Determine memory path dynamically within the constructor
-    const defaultMemoryPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'memory.json');
-    const envPath = process.env.MEMORY_FILE_PATH;
-    this.memoryPath = envPath
-      ? path.isAbsolute(envPath)
-        ? envPath
-        : path.join(path.dirname(fileURLToPath(import.meta.url)), envPath)
-      : defaultMemoryPath;
-    // console.error(`KnowledgeGraphManager using memory path: ${this.memoryPath}`); // Optional debug log
-  }
+        // Determine memory path dynamically within the constructor
+        const defaultMemoryPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'codenexus-knowledge-graph.json');
+        const envPath = process.env.MEMORY_FILE_PATH;
+        this.memoryPath = envPath
+          ? path.isAbsolute(envPath)
+            ? envPath
+            : path.join(path.dirname(fileURLToPath(import.meta.url)), '..', envPath) // Adjust base dir if needed
+          : defaultMemoryPath;
+        // Log initialization path to stderr instead of stdout
+        console.error(`KnowledgeGraphManager initialized. Graph file path: ${this.memoryPath}`); 
 
-  // Type the return value
-  async loadGraph(): Promise<KnowledgeGraph> {
-    try {
-      // Use instance memory path
-      const data = await fs.readFile(this.memoryPath, "utf-8");
-      const lines = data.split("\n").filter(line => line.trim() !== "");
-      // Initialize with specific types
-      const graph: KnowledgeGraph = { entities: [], relations: [] };
-      lines.forEach(line => {
-        // Give item an initial type, refine inside conditional
-        const item: any = JSON.parse(line);
-        // Add type field explicitly when loading if it's missing (for potential backward compat)
-        // These checks are for loading potentially old data, keep them.
-        if (!item.type && item.name && item.entityType) item.type = 'entity';
-        else if (!item.type && item.from && item.to && item.relationType) item.type = 'relation';
-
-        if (item.type === "entity") {
-          // Cast to Entity after ensuring observations/metadata
-          const entityItem = item as Entity; 
-          entityItem.observations = Array.isArray(entityItem.observations) ? entityItem.observations : [];
-          entityItem.metadata = entityItem.metadata || {};
-          graph.entities.push(entityItem);
-        } else if (item.type === "relation") {
-           // Cast to Relation after ensuring metadata
-          const relationItem = item as Relation;
-          relationItem.metadata = relationItem.metadata || {};
-          graph.relations.push(relationItem);
-        }
-      });
-      return graph;
-    } catch (error) {
-      if (error instanceof Error && 'code' in error && error.code === "ENOENT") {
-        // Return empty graph conforming to KnowledgeGraph type
-        return { entities: [], relations: [] };
-      }
-      // Log other errors for better debugging
-      console.error(`Error loading graph from ${this.memoryPath}:`, error);
-      throw error; // Re-throw other errors
-    }
-  }
-
-  // Use specific types for graph parameter and within map
-  async saveGraph(graph: KnowledgeGraph): Promise<void> {
-     // Ensure entities and relations are arrays before mapping (redundant with TS type, but safe)
-    const entitiesToSave = Array.isArray(graph.entities) ? graph.entities : [];
-    const relationsToSave = Array.isArray(graph.relations) ? graph.relations : [];
-
-    const lines = [
-      // Add type explicitly when saving
-      ...entitiesToSave.map((e: Entity) => JSON.stringify({ ...e, type: "entity" })), // Spread entity props
-      ...relationsToSave.map((r: Relation) => JSON.stringify({ ...r, type: "relation" })), // Spread relation props
-    ];
-    try {
-        // Use instance memory path
-      await fs.writeFile(this.memoryPath, lines.join("\n"));
-    } catch (error) {
-        console.error(`Error saving graph to ${this.memoryPath}:`, error);
-        throw error;
-    }
-  }
-
-  // Use specific types for entities parameter and return value
-  async createEntities(entities: Partial<Entity>[]): Promise<Entity[]> { // Allow partial entities as input
-    const graph = await this.loadGraph();
-    const newEntities: Entity[] = []; // Use Entity type
-    entities.forEach((entityInput: Partial<Entity>) => {
-      // Check if entity with the same name already exists
-      if (!graph.entities.some(existingEntity => existingEntity.name === entityInput.name)) {
-        // Ensure required fields are present or provide defaults
-        if (!entityInput.name || !entityInput.entityType) {
-           console.warn('Skipping entity creation: Missing required fields name or entityType', entityInput);
-           return; // Skip this entity if required fields missing
-        }
-        // Create a full Entity object, providing defaults where needed
-        const fullEntity: Entity = {
-            type: 'entity', // Ensure type is set
-            name: entityInput.name,
-            entityType: entityInput.entityType,
-            observations: Array.isArray(entityInput.observations) ? entityInput.observations : [], // Default observations
-            // Add other properties from entityInput or defaults
-            language: entityInput.language,
-            filePath: entityInput.filePath,
-            startLine: entityInput.startLine,
-            endLine: entityInput.endLine,
-            signature: entityInput.signature,
-            summary: entityInput.summary,
-            accessModifier: entityInput.accessModifier,
-            isStatic: entityInput.isStatic,
-            isAsync: entityInput.isAsync,
-            namespace: entityInput.namespace,
-            tags: entityInput.tags,
-            metadata: entityInput.metadata || {},
-        };
-        newEntities.push(fullEntity);
-        graph.entities.push(fullEntity); // Add the validated entity to the graph
-      }
-    });
-    // Removed redundant push of newEntities, already pushed inside loop
-    // graph.entities.push(...newEntities); 
-    await this.saveGraph(graph);
-    return newEntities;
-  }
-
-  // Use specific types for relations parameter and return value
-  async createRelations(relations: Partial<Relation>[]): Promise<Relation[]> { // Allow partial relations
-    const graph = await this.loadGraph();
-    const newRelations: Relation[] = []; // Use Relation type
-    const existingRelationKeys = new Set(
-        graph.relations.map(r => `${r.from}::${r.to}::${r.relationType}`)
-    );
-
-    relations.forEach((relationInput: Partial<Relation>) => {
-      // Ensure required fields are present
-      if (!relationInput.from || !relationInput.to || !relationInput.relationType) {
-          console.warn('Skipping relation creation: Missing required fields from, to, or relationType', relationInput);
-          return; // Skip this relation
-      }
-      const relationKey = `${relationInput.from}::${relationInput.to}::${relationInput.relationType}`;
-      if (!existingRelationKeys.has(relationKey)) {
-         // Create a full Relation object
-          const fullRelation: Relation = {
-              type: 'relation', // Ensure type is set
-              from: relationInput.from,
-              to: relationInput.to,
-              relationType: relationInput.relationType,
-              // Add other optional properties
-              filePath: relationInput.filePath,
-              line: relationInput.line,
-              contextSnippet: relationInput.contextSnippet,
-              metadata: relationInput.metadata || {},
-          };
-        newRelations.push(fullRelation);
-        graph.relations.push(fullRelation); // Add to graph
-        existingRelationKeys.add(relationKey); // Add key to set to prevent duplicates in same batch
-      }
-    });
-    // Removed redundant push
-    // graph.relations.push(...newRelations);
-    await this.saveGraph(graph);
-    return newRelations;
-  }
-
-  // Use the defined types (imported from types.ts)
-  async addObservations(observationsInput: AddObservationInput[]): Promise<AddObservationResult[]> {
-    const graph = await this.loadGraph();
-    const results: AddObservationResult[] = [];
-
-    for (const input of observationsInput) {
-      const entity = graph.entities.find(e => e.name === input.entityName);
-      if (!entity) {
-        console.warn(`Entity with name ${input.entityName} not found during addObservations`);
-        // Optionally add an error entry to results?
-        // results.push({ entityName: input.entityName, addedObservations: [], error: 'Entity not found' });
-        continue; // Skip this input if entity not found
-      }
-
-      // No need to initialize entity.observations, Entity interface requires it
-      // entity.observations = Array.isArray(entity.observations) ? entity.observations : [];
-      const addedObservations: Observation[] = [];
-
-      // Check observationsToAdd exists and is iterable
-      if (input.observationsToAdd && Array.isArray(input.observationsToAdd)) {
-          for (const obsToAddPartial of input.observationsToAdd) {
-              // Ensure required fields are present
-              if (!obsToAddPartial.observationType || !obsToAddPartial.content) {
-                   console.warn('Skipping observation add: Missing required fields observationType or content', obsToAddPartial);
-                   continue; // Skip this observation
-              }
-
-              // Assign a unique ID if one is not provided
-              const obsId = obsToAddPartial.id || crypto.randomUUID();
-
-              // Check if observation with the same ID already exists
-              if (!entity.observations.some(existingObs => existingObs.id === obsId)) {
-                  // Create a full Observation object
-                  const fullObservation: Observation = {
-                      id: obsId,
-                      observationType: obsToAddPartial.observationType,
-                      content: obsToAddPartial.content,
-                      // Add other optional fields
-                      filePath: obsToAddPartial.filePath,
-                      line: obsToAddPartial.line,
-                      severity: obsToAddPartial.severity,
-                      source: obsToAddPartial.source,
-                      timestamp: obsToAddPartial.timestamp,
-                      author: obsToAddPartial.author,
-                      relatedEntities: obsToAddPartial.relatedEntities,
-                      metadata: obsToAddPartial.metadata || {},
-                  };
-                  entity.observations.push(fullObservation);
-                  addedObservations.push(fullObservation);
-              }
-          }
-      }
-      results.push({ entityName: input.entityName, addedObservations });
+        // Use the determined memoryPath when initializing GraphologyManager
+        this.graphManager = new GraphologyManager(this.memoryPath, {
+             allowSelfLoops: true,
+             multi: true,
+             type: 'mixed'
+         });
     }
 
-    await this.saveGraph(graph);
-    return results;
-  }
+    async initialize(): Promise<void> {
+        await this.graphManager.loadGraph();
+    }
 
-  // Use the defined type (imported from types.ts)
-  async deleteEntities(entityNames: string[]): Promise<void> {
-    const graph = await this.loadGraph();
-    // Filter entities based on names
-    graph.entities = graph.entities.filter(e => !entityNames.includes(e.name));
-    // Filter relations involving the deleted entities
-    const entityNameSet = new Set(entityNames);
-    graph.relations = graph.relations.filter(r => !entityNameSet.has(r.from) && !entityNameSet.has(r.to));
-    // Removed temporary checks, types handle this
-    await this.saveGraph(graph);
-  }
+    // Use memoryPath internally if needed, GraphologyManager already has it.
+    async persistGraph(): Promise<void> {
+        // GraphologyManager already knows its path, no need to pass memoryPath here.
+        await this.graphManager.saveGraph();
+    }
 
-  // Use the defined type (imported from types.ts)
-  async deleteObservations(deletions: DeleteObservationInput[]): Promise<void> {
-    const graph = await this.loadGraph();
-    deletions.forEach((d: DeleteObservationInput) => {
-      const entity = graph.entities.find(e => e.name === d.entityName);
-      // Check if entity exists and observations is an array (guaranteed by Entity type)
-      if (entity && Array.isArray(d.observationIds)) { 
-        const idsToDelete = new Set(d.observationIds);
-        // Filter observations based on ID, ensuring o.id is defined
-        entity.observations = entity.observations.filter(o => typeof o.id === 'string' && !idsToDelete.has(o.id));
-      }
-    });
-    // Removed temporary checks
-    await this.saveGraph(graph);
-  }
+    // --- Delegated Methods ---
+    async createEntities(entities: CreateEntitiesInputType['entities']): Promise<z.infer<typeof CreateEntitiesOutputSchema>> {
+        const result = this.graphManager.createEntities(entities as any);
+        await this.persistGraph();
+        return result;
+    }
+    async createRelations(relations: CreateRelationsInputType['relations']): Promise<z.infer<typeof CreateRelationsOutputSchema>> {
+        const result = this.graphManager.createRelations(relations as any);
+        await this.persistGraph();
+        return result;
+    }
+    async createObservations(observations: CreateObservationsInputType['observations']): Promise<z.infer<typeof CreateObservationsOutputSchema>> {
+        const result = this.graphManager.createObservations(observations as any);
+        await this.persistGraph();
+        return result;
+    }
+    async readGraph(input: ReadGraphInputType): Promise<z.infer<typeof ReadGraphOutputSchema>> {
+        return this.graphManager.readGraph(input.filter);
+    }
+    async updateEntities(updates: UpdateEntitiesInputType['updates']): Promise<z.infer<typeof UpdateEntitiesOutputSchema>> {
+        const result = this.graphManager.updateEntities(updates as { id: string; attributes: Partial<NodeAttributes> }[]);
+        await this.persistGraph();
+        return result;
+    }
+    async deleteEntities(ids: DeleteEntitiesInputType['ids']): Promise<z.infer<typeof DeleteEntitiesOutputSchema>> {
+        const result = this.graphManager.deleteEntities(ids);
+        await this.persistGraph();
+        return result;
+    }
+    async deleteRelations(keys: DeleteRelationsInputType['keys']): Promise<z.infer<typeof DeleteRelationsOutputSchema>> {
+        const result = this.graphManager.deleteRelations(keys);
+        await this.persistGraph();
+        return result;
+    }
+    async analyzeCodebase(filePaths: AnalyzeCodebaseInputType['filePaths']): Promise<z.infer<typeof AnalyzeCodebaseOutputSchema>> {
+        const result = await this.graphManager.analyzeCodebase(filePaths);
+        await this.persistGraph();
+        return result;
+    }
 
-  // Use Relation type, allow partial for input flexibility
-  async deleteRelations(relations: Partial<Relation>[]): Promise<void> {
-    const graph = await this.loadGraph();
-    // Create a set of keys for relations to delete for efficient lookup
-    const relationsToDeleteKeys = new Set(
-        relations
-            .filter(dr => dr.from && dr.to && dr.relationType) // Ensure required fields are present
-            .map(dr => `${dr.from}::${dr.to}::${dr.relationType}`)
-    );
-    
-    // Filter out relations whose keys are in the set
-    graph.relations = graph.relations.filter(r => {
-        const relationKey = `${r.from}::${r.to}::${r.relationType}`;
-        return !relationsToDeleteKeys.has(relationKey);
-    });
-    // Removed temporary checks
-    await this.saveGraph(graph);
-  }
+    async queryGraphAdvanced(input: QueryGraphAdvancedInputType): Promise<z.infer<typeof QueryGraphAdvancedOutputSchema>> {
+        // Placeholder implementation - delegates to GraphologyManager
+        console.warn("KnowledgeGraphManager.queryGraphAdvanced called, delegating to GraphologyManager. Actual implementation pending.");
+        // @ts-ignore - input might not perfectly match until GraphologyManager method is defined
+        return this.graphManager.queryGraphAdvanced(input);
+        // TODO: Persist graph if the query modifies anything? (Likely not for queries)
+    }
 
-  // Return type is KnowledgeGraph
-  async readGraph(): Promise<KnowledgeGraph> {
-    return this.loadGraph();
-  }
-
-  // Return type is KnowledgeGraph, query is string
-  async searchNodes(query: string): Promise<KnowledgeGraph> {
-    const graph = await this.loadGraph();
+    // --- Methods needing review/refactoring based on Graphology --- 
+    async searchNodes(query: SearchNodesInputType['query']): Promise<any> {
+        console.warn("searchNodes is not fully implemented for Graphology yet.");
     const lowerCaseQuery = query.toLowerCase();
-
-    const filteredEntities = graph.entities.filter(e => { // e is now type Entity
-      // Check standard fields
-      if (e.name?.toLowerCase().includes(lowerCaseQuery) ||
-          e.entityType?.toLowerCase().includes(lowerCaseQuery) ||
-          e.language?.toLowerCase().includes(lowerCaseQuery) ||
-          e.filePath?.toLowerCase().includes(lowerCaseQuery) ||
-          e.signature?.toLowerCase().includes(lowerCaseQuery) ||
-          e.summary?.toLowerCase().includes(lowerCaseQuery) ||
-          e.namespace?.toLowerCase().includes(lowerCaseQuery)) {
-        return true;
-      }
-      // Check tags (tag is string based on Entity type)
-      if (e.tags?.some(tag => tag.toLowerCase().includes(lowerCaseQuery))) {
-        return true;
-      }
-      // Check observations content AND metadata (o is Observation)
-      if (e.observations?.some(o => { 
-        // Check standard observation fields
-        if (o.content?.toLowerCase().includes(lowerCaseQuery) || 
-            o.observationType?.toLowerCase().includes(lowerCaseQuery) ||
-            o.source?.toLowerCase().includes(lowerCaseQuery) ||
-            o.author?.toLowerCase().includes(lowerCaseQuery)) {
-              return true;
-            }
-        // Check observation metadata (value is any)
-        if (o.metadata && Object.entries(o.metadata).some(([key, value]) => 
-            key.toLowerCase().includes(lowerCaseQuery) ||
-            (typeof value === 'string' && value.toLowerCase().includes(lowerCaseQuery)) ||
-             // Handle potential numbers/booleans in metadata, convert to string for search
-            (typeof value === 'number' && value.toString().toLowerCase().includes(lowerCaseQuery)) ||
-            (typeof value === 'boolean' && value.toString().toLowerCase().includes(lowerCaseQuery))
-        )) {
-          return true;
-        }
-        return false;
-      })) {
-        return true;
-      }
-
-      // Check entity metadata (value is any)
-      if (e.metadata && Object.entries(e.metadata).some(([key, value]) => 
-          key.toLowerCase().includes(lowerCaseQuery) ||
-          (typeof value === 'string' && value.toLowerCase().includes(lowerCaseQuery)) ||
-          (typeof value === 'number' && value.toString().toLowerCase().includes(lowerCaseQuery)) ||
-          (typeof value === 'boolean' && value.toString().toLowerCase().includes(lowerCaseQuery))
-      )) {
-        return true;
-      }
-
-      return false;
-    });
-
-    // Create a Set of filtered entity names for quick lookup (e is Entity)
-    const filteredEntityNames = new Set(filteredEntities.map(e => e.name));
-    // Filter relations to only include those between filtered entities (r is Relation)
-    const filteredRelations = graph.relations.filter(r => 
-      filteredEntityNames.has(r.from) && filteredEntityNames.has(r.to)
-    );
-    const filteredGraph: KnowledgeGraph = {
-      entities: filteredEntities,
-      relations: filteredRelations,
-    };
-    return filteredGraph;
-  }
-
-  // Return type is KnowledgeGraph, names is string[]
-  async openNodes(names: string[]): Promise<KnowledgeGraph> {
-    const graph = await this.loadGraph();
-    // Filter entities (e is Entity)
-    const filteredEntities = graph.entities.filter(e => names.includes(e.name));
-    // Create a Set of filtered entity names for quick lookup (e is Entity)
-    const filteredEntityNames = new Set(filteredEntities.map(e => e.name));
-    // Filter relations to only include those between filtered entities (r is Relation)
-    const filteredRelations = graph.relations.filter(r => 
-      filteredEntityNames.has(r.from) && filteredEntityNames.has(r.to)
-    );
-    const filteredGraph: KnowledgeGraph = {
-      entities: filteredEntities,
-      relations: filteredRelations,
-    };
-    return filteredGraph;
-  }
+        const results = this.graphManager.getGraphInstance().filterNodes((node, attributes: NodeAttributes) => {
+             return (
+                 attributes.name?.toLowerCase().includes(lowerCaseQuery) ||
+                 attributes.content?.toLowerCase().includes(lowerCaseQuery) ||
+                 attributes.type?.toLowerCase().includes(lowerCaseQuery) ||
+                 attributes.identifier?.toLowerCase().includes(lowerCaseQuery) ||
+                 (Array.isArray(attributes.tags) && attributes.tags.some((tag: string) => tag.toLowerCase().includes(lowerCaseQuery)))
+            );
+        });
+        return results.map(nodeId => ({
+            id: nodeId,
+            attributes: this.graphManager.getGraphInstance().getNodeAttributes(nodeId) as NodeAttributes
+        }));
+    }
+    async openNodes(names: OpenNodesInputType['names']): Promise<any> {
+        console.warn("openNodes assumes input names are valid node IDs for Graphology.");
+        return this.graphManager.readGraph({ nodeIds: names });
+    }
 }
 
-export { KnowledgeGraphManager }; // Export the class for import
-
-// const knowledgeGraphManager = new KnowledgeGraphManager(); // Keep instance creation local to where needed (e.g., main)
-
-// The server instance and tools exposed will be created in main()
-// const server = new Server(...); 
-
-// Move server setup and request handlers into the main function
+// ---------------- MCP Server Setup (Using McpServer) ------------------
 
 async function main(): Promise<void> {
-  const knowledgeGraphManager: KnowledgeGraphManager = new KnowledgeGraphManager();
-  
-  // Re-add capabilities definition
-  const server: Server = new Server({
-    name: "knowledge-graph-mcp",
-    version: "1.1.0",
-  }, {
-    // Explicitly declare tool capability
-    capabilities: {
-      tools: {}
-    }
-  });
+    console.error("[Server Log] Initializing KnowledgeGraphManager...");
+    const knowledgeGraphManager = new KnowledgeGraphManager();
+    await knowledgeGraphManager.initialize();
+    console.error("[Server Log] KnowledgeGraphManager initialized.");
 
-  // Define tools with direct JSON Schema objects
-  const tools: Tool[] = [
-      {
-          name: "create_entities",
-          description: "Create multiple new entities in the knowledge graph.",
-          inputSchema: {
-              type: "object",
-              properties: {
-                  entities: {
-                      type: "array",
-                      items: {
-                          type: "object",
-                          properties: {
-                              name: { type: "string", description: "Unique identifier" },
-                              entityType: { type: "string", description: "Type of entity (e.g., 'class', 'function')" },
-                              language: { type: "string", description: "Programming language" },
-                              filePath: { type: "string", description: "Relative path to the file" },
-                              startLine: { type: "integer", minimum: 1, description: "Starting line number (1-indexed)" },
-                              endLine: { type: "integer", minimum: 1, description: "Ending line number (1-indexed)" },
-                              signature: { type: "string", description: "Function/method signature" },
-                              summary: { type: "string", description: "Brief description" },
-                              accessModifier: { type: "string", enum: ['public', 'private', 'protected'] },
-                              isStatic: { type: "boolean" },
-                              isAsync: { type: "boolean" },
-                              namespace: { type: "string" },
-                              tags: { type: "array", items: { type: "string" } },
-                              observations: {
-                                  type: "array",
-                                  items: {
-                                      type: "object",
-                                      properties: {
-                                          observationType: { type: "string" },
-                                          content: { type: "string" },
-                                          // Add other optional Observation properties here if needed for input schema
-                                          filePath: { type: "string" },
-                                          line: { type: "integer", minimum: 1 },
-                                          severity: { type: "string", enum: ['high', 'medium', 'low', 'info'] },
-                                          source: { type: "string" },
-                                          timestamp: { type: "string", format: "date-time" },
-                                          author: { type: "string" },
-                                          relatedEntities: { type: "array", items: { type: "string" } },
-                                          metadata: { type: "object" }
-                                      },
-                                      required: ["observationType", "content"],
-                                      additionalProperties: false
-                                  }
-                              },
-                              metadata: { type: "object" }
-                          },
-                          required: ["name", "entityType"],
-                          additionalProperties: false // Usually good practice for input schemas
-                      },
-                      description: "Array of partial entity objects to create. 'name' and 'entityType' are required. Nested 'observations' require 'observationType' and 'content'."
-                  }
-              },
-              required: ["entities"],
-              additionalProperties: false
-          },
-          outputSchema: {
-              type: "object",
-              properties: {
-                  content: {
-                      type: "array",
-                      items: {
-                          type: "object",
-                          properties: {
-                              type: { type: "string", const: "text" },
-                              text: { type: "string", description: "Stringified JSON array of created entities" }
-                          },
-                          required: ["type", "text"]
-                      },
-                      minItems: 1,
-                      maxItems: 1
-                  }
-              },
-              required: ["content"]
-          }
-      },
-      {
-          name: "create_relations",
-          description: "Create multiple new relations between existing entities.",
-          inputSchema: {
-              type: "object",
-              properties: {
-                  relations: {
-                      type: "array",
-                      items: {
-                          type: "object",
-                          properties: {
-                              from: { type: "string", description: "Name of the source entity" },
-                              to: { type: "string", description: "Name of the target entity" },
-                              relationType: { type: "string", description: "Type of relationship (e.g., 'CALLS')" },
-                              filePath: { type: "string" },
-                              line: { type: "integer", minimum: 1 },
-                              contextSnippet: { type: "string" },
-                              metadata: { type: "object" }
-                          },
-                          required: ["from", "to", "relationType"],
-                          additionalProperties: false
-                      },
-                      description: "Array of partial relation objects to create. 'from', 'to', and 'relationType' are required."
-                  }
-              },
-              required: ["relations"],
-              additionalProperties: false
-          },
-          outputSchema: { // Assuming output is similar to create_entities (stringified relation array)
-              type: "object",
-              properties: {
-                  content: {
-                      type: "array",
-                      items: {
-                          type: "object",
-                          properties: {
-                              type: { type: "string", const: "text" },
-                              text: { type: "string", description: "Stringified JSON array of created relations" }
-                          },
-                          required: ["type", "text"]
-                      },
-                      minItems: 1,
-                      maxItems: 1
-                  }
-              },
-              required: ["content"]
-          }
-      },
-       {
-            name: "add_observations",
-            description: "Add observations to existing entities.",
-            inputSchema: {
-                type: "object",
-                properties: {
-                    observationsInput: {
-                        type: "array",
-                        items: {
-                            type: "object",
-                            properties: {
-                                entityName: { type: "string", description: "Name of the entity to add observations to" },
-                                observationsToAdd: {
-                                    type: "array",
-                                    items: {
-                                        type: "object",
-                                        properties: {
-                                            observationType: { type: "string" },
-                                            content: { type: "string" },
-                                            filePath: { type: "string" },
-                                            line: { type: "integer", minimum: 1 },
-                                            severity: { type: "string", enum: ['high', 'medium', 'low', 'info'] },
-                                            source: { type: "string" },
-                                            timestamp: { type: "string", format: "date-time" },
-                                            author: { type: "string" },
-                                            relatedEntities: { type: "array", items: { type: "string" } },
-                                            metadata: { type: "object" }
-                                            // id is omitted as it's generated/ignored on input
-                                        },
-                                        required: ["observationType", "content"],
-                                        additionalProperties: false
-                                    },
-                                    description: "Array of partial observation objects to add. 'observationType' and 'content' are required."
-                                }
-                            },
-                            required: ["entityName", "observationsToAdd"],
-                            additionalProperties: false
-                        }
-                    }
-                },
-                required: ["observationsInput"],
-                additionalProperties: false
-            },
-            outputSchema: { // Assuming output is stringified AddObservationResult array
-                type: "object",
-                properties: {
-                    content: {
-                        type: "array",
-                        items: {
-                            type: "object",
-                            properties: {
-                                type: { type: "string", const: "text" },
-                                text: { type: "string", description: "Stringified JSON array of results (added observations per entity)" }
-                            },
-                            required: ["type", "text"]
-                        },
-                        minItems: 1,
-                        maxItems: 1
-                    }
-                },
-                required: ["content"]
-            }
-       },
-       {
-           name: "delete_entities",
-           description: "Delete entities and their associated relations/observations by name.",
-           inputSchema: {
-               type: "object",
-               properties: {
-                   entityNames: {
-                       type: "array",
-                       items: { type: "string" },
-                       description: "Array of names of the entities to delete."
-                   }
-               },
-               required: ["entityNames"],
-               additionalProperties: false
-           },
-           outputSchema: { // Generic success message
-               type: "object",
-               properties: {
-                   content: {
-                       type: "array",
-                       items: {
-                           type: "object",
-                           properties: {
-                               type: { type: "string", const: "text" },
-                               text: { type: "string" }
-                           },
-                           required: ["type", "text"]
-                       },
-                       minItems: 1,
-                       maxItems: 1
-                   }
-               },
-               required: ["content"]
-           }
-       },
-       {
-           name: "delete_observations",
-           description: "Delete specific observations from entities.",
-           inputSchema: {
-               type: "object",
-               properties: {
-                   deletions: {
-                       type: "array",
-                       items: {
-                           type: "object",
-                           properties: {
-                               entityName: { type: "string", description: "Name of the entity" },
-                               observationIds: {
-                                   type: "array",
-                                   items: { type: "string", format: "uuid" },
-                                   description: "Array of UUIDs of the observations to delete."
-                               }
-                           },
-                           required: ["entityName", "observationIds"],
-                           additionalProperties: false
-                       }
-                   }
-               },
-               required: ["deletions"],
-               additionalProperties: false
-           },
-           outputSchema: { // Generic success message
-               type: "object",
-               properties: {
-                   content: {
-                       type: "array",
-                       items: {
-                           type: "object",
-                           properties: {
-                               type: { type: "string", const: "text" },
-                               text: { type: "string" }
-                           },
-                           required: ["type", "text"]
-                       },
-                       minItems: 1,
-                       maxItems: 1
-                   }
-               },
-               required: ["content"]
-           }
-       },
-       {
-           name: "delete_relations",
-           description: "Delete specific relations between entities.",
-           inputSchema: {
-               type: "object",
-               properties: {
-                   relations: {
-                       type: "array",
-                       items: {
-                           type: "object",
-                           properties: {
-                               from: { type: "string" },
-                               to: { type: "string" },
-                               relationType: { type: "string" }
-                               // Only include required fields to identify the relation
-                           },
-                           required: ["from", "to", "relationType"],
-                           additionalProperties: false // Keep this strict for identification
-                       },
-                       description: "Array of partial relation objects identifying relations to delete. 'from', 'to', and 'relationType' are required."
-                   }
-               },
-               required: ["relations"],
-               additionalProperties: false
-           },
-           outputSchema: { // Generic success message
-               type: "object",
-               properties: {
-                   content: {
-                       type: "array",
-                       items: {
-                           type: "object",
-                           properties: {
-                               type: { type: "string", const: "text" },
-                               text: { type: "string" }
-                           },
-                           required: ["type", "text"]
-                       },
-                       minItems: 1,
-                       maxItems: 1
-                   }
-               },
-               required: ["content"]
-           }
-       },
-       {
-           name: "read_graph",
-           description: "Read the entire current knowledge graph.",
-           inputSchema: { // Empty object schema
-               type: "object",
-               properties: {},
-               additionalProperties: false
-           },
-           outputSchema: { // Output is stringified KnowledgeGraph
-               type: "object",
-               properties: {
-                   content: {
-                       type: "array",
-                       items: {
-                           type: "object",
-                           properties: {
-                               type: { type: "string", const: "text" },
-                               text: { type: "string", description: "Stringified JSON KnowledgeGraph" }
-                           },
-                           required: ["type", "text"]
-                       },
-                       minItems: 1,
-                       maxItems: 1
-                   }
-               },
-               required: ["content"]
-           }
-       },
-       {
-           name: "search_nodes",
-           description: "Search for nodes (entities) based on a query string across various fields.",
-           inputSchema: {
-               type: "object",
-               properties: {
-                   query: { type: "string", description: "The search query string." }
-               },
-               required: ["query"],
-               additionalProperties: false
-           },
-           outputSchema: { // Output is stringified KnowledgeGraph
-               type: "object",
-               properties: {
-                   content: {
-                       type: "array",
-                       items: {
-                           type: "object",
-                           properties: {
-                               type: { type: "string", const: "text" },
-                               text: { type: "string", description: "Stringified JSON KnowledgeGraph of matching nodes" }
-                           },
-                           required: ["type", "text"]
-                       },
-                       minItems: 1,
-                       maxItems: 1
-                   }
-               },
-               required: ["content"]
-           }
-       },
-       {
-           name: "open_nodes",
-           description: "Retrieve specific entities by name and their direct relations.",
-           inputSchema: {
-               type: "object",
-               properties: {
-                   names: {
-                       type: "array",
-                       items: { type: "string" },
-                       description: "Array of entity names to retrieve."
-                   }
-               },
-               required: ["names"],
-               additionalProperties: false
-           },
-           outputSchema: { // Output is stringified KnowledgeGraph
-               type: "object",
-               properties: {
-                   content: {
-                       type: "array",
-                       items: {
-                           type: "object",
-                           properties: {
-                               type: { type: "string", const: "text" },
-                               text: { type: "string", description: "Stringified JSON KnowledgeGraph of specified nodes and their relations" }
-                           },
-                           required: ["type", "text"]
-                       },
-                       minItems: 1,
-                       maxItems: 1
-                   }
-               },
-               required: ["content"]
-           }
-       },
-  ];
-
-  server.setRequestHandler(ListToolsRequestSchema, async () => {
-    // Directly return the array of tool definitions with JSON Schemas
-    return { tools }; // No need for 'as any' cast anymore
-  });
-
-  // Use original CallToolRequest type, remove explicit handler/return types
-  // Keep Zod parsing here for validation
-  server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest) => {
-    const { name, arguments: args } = request.params;
-    const toolName = name;
-
-    if (args === undefined || args === null) {
-        console.error(`Error executing tool '${toolName}': No arguments provided.`);
-        return { error: { code: 'invalid_request', message: `No arguments provided for tool: ${toolName}` } };
-    }
-
-    try {
-        switch (toolName) {
-        case "create_entities": {
-            const parsedArgs = CreateEntitiesInputSchema.parse(args); // Keep Zod parsing
-            const createdEntities = await knowledgeGraphManager.createEntities(parsedArgs.entities);
-            return { content: [{ type: "text", text: JSON.stringify(createdEntities, null, 2) }] };
-        }
-        case "create_relations": {
-            const parsedArgs = CreateRelationsInputSchema.parse(args); // Keep Zod parsing
-            const createdRelations = await knowledgeGraphManager.createRelations(parsedArgs.relations);
-            return { content: [{ type: "text", text: JSON.stringify(createdRelations, null, 2) }] };
-        }
-        case "add_observations": {
-            const parsedArgs = AddObservationsInputSchema.parse(args); // Keep Zod parsing
-            const results = await knowledgeGraphManager.addObservations(parsedArgs.observationsInput);
-            return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
-        }
-        case "delete_entities": {
-            const parsedArgs = DeleteEntitiesInputSchema.parse(args); // Keep Zod parsing
-            await knowledgeGraphManager.deleteEntities(parsedArgs.entityNames);
-            return { content: [{ type: "text", text: "Entities deleted successfully" }] };
-        }
-        case "delete_observations": {
-            const parsedArgs = DeleteObservationsInputSchema.parse(args); // Keep Zod parsing
-            await knowledgeGraphManager.deleteObservations(parsedArgs.deletions);
-            return { content: [{ type: "text", text: "Observations deleted successfully" }] };
-        }
-        case "delete_relations": {
-            const parsedArgs = DeleteRelationsInputSchema.parse(args); // Keep Zod parsing
-            await knowledgeGraphManager.deleteRelations(parsedArgs.relations);
-            return { content: [{ type: "text", text: "Relations deleted successfully" }] };
-        }
-        case "read_graph": {
-            ReadGraphInputSchema.parse(args); // Keep Zod parsing (for empty object check)
-            const graph = await knowledgeGraphManager.readGraph();
-            return { content: [{ type: "text", text: JSON.stringify(graph, null, 2) }] };
-        }
-        case "search_nodes": {
-            const parsedArgs = SearchNodesInputSchema.parse(args); // Keep Zod parsing
-            const results = await knowledgeGraphManager.searchNodes(parsedArgs.query);
-            return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
-        }
-        case "open_nodes": {
-            const parsedArgs = OpenNodesInputSchema.parse(args); // Keep Zod parsing
-            const results = await knowledgeGraphManager.openNodes(parsedArgs.names);
-            return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
-        }
-        default:
-            console.error(`Error executing tool: Unknown tool name '${toolName}'`);
-            return { error: { code: 'invalid_request', message: `Unknown tool: ${toolName}` } };
-        }
-    } catch (error) {
-        console.error(`Error executing tool '${toolName}':`, error);
-        if (error instanceof ZodError) {
-            return { error: { code: 'invalid_params', message: `Invalid arguments for tool ${toolName}: ${error.errors.map(e => `${e.path.join('.')} (${e.code}): ${e.message}`).join(', ')}` } };
-        }
-        const errorMessage = error instanceof Error ? error.message : 'An unknown error occurred during tool execution';
-        return { error: { code: 'internal_error', message: `Tool execution failed for ${toolName}: ${errorMessage}` } };
-    }
-  });
-
-  // Connect transport inside main
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("Knowledge Graph MCP Server running on stdio");
-}
-
-// Check if the script is being run directly before calling main()
-// This prevents main() from running when the file is imported.
-// Need to adjust path check for TS -> JS compilation
-// A common pattern is to check process.mainModule, but that's CJS specific.
-// For ESM, the original check might be okay if run via `node dist/server.js`
-// Let's keep the original logic for now and test.
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
-    main().catch((error) => {
-      console.error("Fatal error in main():", error);
-      process.exit(1);
+    console.error("[Server Log] Instantiating McpServer...");
+    const server = new McpServer({
+        name: "codenexus-mcp-knowledge-graph-server",
+        version: "1.0.7",
+        description: "Manages a knowledge graph of a codebase using graphology, including codebase analysis capabilities."
     });
+    console.error("[Server Log] McpServer instantiated.");
+
+    // --- Register Tools using server.tool --- 
+
+    console.error("[Server Log] Registering tools...");
+
+    server.tool(
+        "create_entities", 
+        "Creates or updates multiple entities (nodes) in the knowledge graph. If an entity ID already exists, its attributes are merged.",
+        CreateEntitiesInputSchema.shape, 
+        async (args: z.infer<typeof CreateEntitiesInputSchema>) => {
+            const result = await knowledgeGraphManager.createEntities(args.entities);
+            return { content: [{ type: "text", text: `Created: [${result.createdIds.join(', ')}]. Existing: [${result.existingIds.join(', ')}]` }] };
+        }
+    );
+
+    server.tool(
+        "create_relations", 
+        "Creates multiple relations (edges) between existing entities in the knowledge graph.",
+        CreateRelationsInputSchema.shape,
+        async (args: z.infer<typeof CreateRelationsInputSchema>) => {
+            const result = await knowledgeGraphManager.createRelations(args.relations);
+            const errorsText = result.errors.length > 0 ? ` Errors: ${result.errors.join('; ')}` : '';
+            return { content: [{ type: "text", text: `Created keys: [${result.createdKeys.join(', ')}].${errorsText}` }] };
+        }
+    );
+
+    server.tool(
+        "create_observations", 
+        "Creates observation nodes and links them to specified related entities.",
+        CreateObservationsInputSchema.shape,
+        async (args: z.infer<typeof CreateObservationsInputSchema>) => {
+            const result = await knowledgeGraphManager.createObservations(args.observations);
+            return { content: [{ type: "text", text: `Created observation IDs: [${result.createdIds.join(', ')}]` }] };
+        }
+    );
+
+    server.tool(
+        "read_graph", 
+        "Reads nodes and edges from the knowledge graph, with optional filtering.",
+        ReadGraphInputSchema.shape,
+        async (args: z.infer<typeof ReadGraphInputSchema>) => {
+            const result = await knowledgeGraphManager.readGraph(args);
+            // Format the complex result as text for now
+            const outputText = `Found ${result.nodes.length} nodes and ${result.edges.length} edges matching filter.`; 
+            // TODO: Consider returning structured data if McpServer supports richer content types for tools
+            return { content: [{ type: "text", text: outputText }] }; 
+        }
+    );
+
+    server.tool(
+        "update_entities", 
+        "Merges attributes into existing entities (nodes) in the knowledge graph.",
+        UpdateEntitiesInputSchema.shape,
+        async (args: z.infer<typeof UpdateEntitiesInputSchema>) => {
+            const result = await knowledgeGraphManager.updateEntities(args.updates);
+            return { content: [{ type: "text", text: `Updated: [${result.updatedIds.join(', ')}]. Not Found: [${result.notFoundIds.join(', ')}]` }] };
+        }
+    );
+
+    server.tool(
+        "delete_entities", 
+        "Deletes specified entities (nodes) and their incident edges from the knowledge graph.",
+        DeleteEntitiesInputSchema.shape,
+        async (args: z.infer<typeof DeleteEntitiesInputSchema>) => {
+            const result = await knowledgeGraphManager.deleteEntities(args.ids);
+             return { content: [{ type: "text", text: `Deleted: [${result.deletedIds.join(', ')}]. Not Found: [${result.notFoundIds.join(', ')}]` }] };
+       }
+    );
+
+    server.tool(
+        "delete_relations", 
+        "Deletes specified relations (edges) from the knowledge graph using their keys (IDs).",
+        DeleteRelationsInputSchema.shape,
+        async (args: z.infer<typeof DeleteRelationsInputSchema>) => {
+            const result = await knowledgeGraphManager.deleteRelations(args.keys);
+            return { content: [{ type: "text", text: `Deleted keys: [${result.deletedKeys.join(', ')}]. Not Found: [${result.notFoundKeys.join(', ')}]` }] };
+        }
+    );
+
+    server.tool(
+        "analyze_codebase", 
+        "Analyzes specified files or directories using glob patterns, extracts code structure, and adds them to the knowledge graph.",
+        AnalyzeCodebaseInputSchema.shape,
+        async (args: z.infer<typeof AnalyzeCodebaseInputSchema>) => {
+            const result = await knowledgeGraphManager.analyzeCodebase(args.filePaths);
+            return { content: [{ type: "text", text: `Analyzed ${result.analyzedFiles} files. Created ${result.entitiesCreated} entities, ${result.relationsCreated} relations.` }] };
+        }
+    );
+
+    server.tool(
+        "query_graph_advanced", 
+        "Performs advanced queries on the graph (traversal, shortest path).",
+        QueryGraphAdvancedInputSchema.shape,
+        async (args: z.infer<typeof QueryGraphAdvancedInputSchema>) => {
+            const result = await knowledgeGraphManager.queryGraphAdvanced(args);
+            // Format the complex result as text for now
+            const outputText = `Query (${result.query_type}) result: ${JSON.stringify(result)}`; // Simple JSON stringify for now
+            return { content: [{ type: "text", text: outputText }] };
+        }
+    );
+
+    server.tool(
+        "search_nodes", 
+        "(Experimental) Searches graph nodes based on a query string.",
+        SearchNodesInputSchema.shape,
+        async (args: z.infer<typeof SearchNodesInputSchema>) => {
+            const results = await knowledgeGraphManager.searchNodes(args.query);
+            // This already returns the correct structure
+            const textResult = results.map((node: any) => `ID: ${node.id}, Attrs: ${JSON.stringify(node.attributes)}`).join('\n');
+            return { content: [{ type: "text", text: textResult || "No matching nodes found." }] };
+        }
+    );
+
+    server.tool(
+        "open_nodes", 
+        "(Needs Verification) Retrieves specific nodes and their attributes using their IDs.",
+        OpenNodesInputSchema.shape,
+        async (args: z.infer<typeof OpenNodesInputSchema>) => {
+            const result = await knowledgeGraphManager.openNodes(args.names);
+            // Format the ReadGraphOutputSchema structure as text
+             const outputText = `Opened nodes: ${JSON.stringify(result)}`; // Simple JSON stringify
+            return { content: [{ type: "text", text: outputText }] };
+        }
+    );
+
+    console.error("[Server Log] Tools registered.");
+
+    // --- Connect and Run Server ---
+    console.error("[Server Log] Creating StdioServerTransport...");
+    const transport = new StdioServerTransport();
+    console.error("[Server Log] StdioServerTransport created.");
+
+    console.error("[Server Log] Connecting server to transport...");
+    await server.connect(transport); // Use the same connect method
+    console.error("[Server Log] Server connected to transport.");
+
+    console.error("MCP server connected and listening on stdin/stdout.");
 }
+
+main().catch(error => {
+    console.error("[Server Log] Fatal error starting server:", error);
+    process.exit(1);
+});
