@@ -7,6 +7,7 @@ The goal is to build a comprehensive, queryable representation of the codebase t
 ## Server Components
 
 - `server.js`: The main Node.js script that runs the MCP server.
+- `server.ts`: The main TypeScript script that compiles to `dist/server.js` (which then runs as the MCP server).
 - `memory.json`: The default file used to persist the knowledge graph data.
 
 ## Setup and Configuration
@@ -17,62 +18,38 @@ The goal is to build a comprehensive, queryable representation of the codebase t
     ```
 2.  **Run the Server:**
     ```bash
-    node server.js
+    npm run build # To compile TypeScript to JavaScript in dist/
+    node dist/server.js
     ```
     The server will listen for MCP requests on standard input/output.
 
 3.  **Persistence Configuration:**
-    -   The knowledge graph is persisted in a file named `memory.json` by default, located in the same directory as `server.js`.
+    -   The knowledge graph is persisted in a file named `memory.json` by default. When running the compiled `dist/server.js`, this file will be created in/read from the `dist` directory. If running `src/server.ts` directly (e.g., with `ts-node`), it will be relative to the `src` directory.
     -   The file uses the **JSON Lines (JSONL)** format, where each line is a separate JSON object representing either an entity or a relation.
     -   You can specify a custom path for the persistence file by setting the `MEMORY_FILE_PATH` environment variable before running the server:
       ```bash
       # Example using a custom path (Linux/macOS)
       export MEMORY_FILE_PATH=/path/to/your/custom-graph.jsonl
-      node server.js
+      node dist/server.js
 
       # Example using a custom path (Windows PowerShell)
       $env:MEMORY_FILE_PATH = "C:\path\to\your\custom-graph.jsonl"
-      node server.js
+      node dist/server.js
       ```
 
 ## Knowledge Graph Schema
 
 The graph stored and managed by this server consists of three primary components: Entities, Relations, and Observations. Entities represent the core elements (code constructs, project), Relations define connections between them, and Observations attach qualitative information or metadata.
 
-The detailed structure of these components, as defined in `server.js`, is as follows:
+The detailed structure of these components, as implemented in `src/server.ts`, is as follows:
 
 ### `Entity`
 
 Represents a distinct element within the codebase or project.
 
--   `name` (string, required): Unique identifier (e.g., function name, class name, file path).
--   `entityType` (string, required): Type of entity (e.g., 'class', 'function', 'module', 'variable', 'file', 'project').
--   `language` (string, optional): Programming language (e.g., 'javascript', 'python').
--   `filePath` (string, optional): Relative path to the file containing the entity.
--   `startLine` (number, optional): Starting line number (1-indexed).
--   `endLine` (number, optional): Ending line number (1-indexed).
--   `signature` (string, optional): For functions/methods: parameter list, return type.
--   `summary` (string, optional): Brief description (e.g., from docstring).
--   `accessModifier` ('public' | 'private' | 'protected', optional): Language-specific access control.
--   `isStatic` (boolean, optional): Language-specific static indicator.
--   `isAsync` (boolean, optional): Language-specific async indicator.
--   `namespace` (string, optional): Module or namespace.
--   `tags` (string[], optional): User-defined tags for categorization.
--   `observations` (Observation[], required): Array of Observation objects associated with this entity (initialized as empty array if not provided).
--   `metadata` (Record<string, any>, optional): Other custom or tool-specific data.
-
-### `ProjectEntity`
-
-A specific type of `Entity` (`entityType: 'project'`) used to store high-level information about the project itself.
-
--   `name` (string, required): Unique name/identifier for the project (e.g., 'my-web-app').
--   `entityType` ('project', required): Must be 'project'.
--   `description` (string, optional): High-level description of the project.
--   `technologies` (string[], optional): List of key technologies used (e.g., ['React', 'Node.js', 'PostgreSQL']).
--   `architectureStyle` (string, optional): Overall architecture (e.g., 'Microservices', 'Monolith', 'Serverless').
--   `repositoryUrl` (string, optional): URL of the code repository.
--   `observations` (Observation[], required): Relevant observations for the project itself (e.g., high-level design decisions, roadmap links).
--   `metadata` (Record<string, any>, optional): Other custom project-specific data.
+-   `name` (string, required): Unique identifier for the entity.
+-   `entityType` (string, required): The type of the entity (e.g., 'class', 'function', 'file', 'project').
+-   `observations` (string[], required): An array of plain string observations associated with this entity.
 
 ### `Relation`
 
@@ -80,32 +57,14 @@ Represents a directed relationship between two Entities.
 
 -   `from` (string, required): Name of the source entity.
 -   `to` (string, required): Name of the target entity.
--   `relationType` (string, required): Type of relationship (e.g., 'CALLS', 'IMPLEMENTS', 'IMPORTS', 'CONTAINS').
--   `filePath` (string, optional): File where the relation occurs/is defined.
--   `line` (number, optional): Line number where the relation occurs (1-indexed).
--   `contextSnippet` (string, optional): Small code snippet illustrating the relation.
--   `metadata` (Record<string, any>, optional): Other custom or tool-specific data.
+-   `relationType` (string, required): Type of relationship (e.g., 'CALLS', 'IMPLEMENTS', 'REFERENCES').
 
 ### `Observation`
 
 Represents a piece of qualitative information or metadata attached to an Entity.
 
--   `id` (string, required): Unique ID for the observation (automatically generated UUID if not provided).
--   `observationType` (string, required): Type of observation. Standard types include:
-    -   `'design_pattern_use'`: Describes the use of a design pattern. Recommended `metadata`: `{ patternName: string, role?: string }`.
-    -   `'design_decision'`: Documents a specific design choice. Recommended `metadata`: `{ rationale?: string, alternativesConsidered?: string[], decisionMaker?: string, relatedIssue?: string }`.
-    -   `'change_rationale'`: Explains the reason for a code change. Recommended `metadata`: `{ commitHash?: string, author?: string, relatedIssue?: string, summaryOfChange?: string }`.
-    -   `'project_meta'`: Stores project-level metadata (usually attached to a 'Project' entity). Recommended `metadata` depends on the specific info (e.g., `{ repositoryUrl: string, primaryTechnology: string }`).
-    -   Other common types: `'comment'`, `'todo'`, `'fixme'`, `'security_note'`, `'performance_note'`.
--   `content` (string, required): The main text/content of the observation.
--   `filePath` (string, optional): File relevant to the observation.
--   `line` (number, optional): Line number relevant to the observation (1-indexed).
--   `severity` ('high' | 'medium' | 'low' | 'info', optional): Severity level.
--   `source` (string, optional): Origin (e.g., 'static_analysis', 'human_annotator', 'llm', 'code_comment').
--   `timestamp` (string, optional): ISO 8601 timestamp (e.g., `new Date().toISOString()`).
--   `author` (string, optional): Who/what created the observation.
--   `relatedEntities` (string[], optional): Names of other related entities.
--   `metadata` (Record<string, any>, optional): Other custom data. See recommended fields under `observationType` for standard types.
+-   `entityName` (string, required): Name of entity.
+-   `contents`(string[], required): observations about entity
 
 ## API Tools Reference
 
@@ -113,41 +72,56 @@ The server exposes the following tools via the Model Context Protocol (MCP). The
 
 ### `create_entities`
 
--   **Purpose:** Creates one or more new entities in the knowledge graph. If an entity with the same `name` already exists, it is ignored.
--   **Arguments:**
+-   **Purpose:** Creates one or more new entities in the knowledge graph, adhering to the simplified `Entity` schema (name, entityType, array of string observations) defined in `src/server.ts`. If an entity with the same `name` already exists, the `KnowledgeGraphManager` will not create a duplicate.
+-   **Arguments:** (Matches the `inputSchema` in `src/server.ts`)
     ```json
     {
-      "entities": [ ]
-    }
-    ```
--   **Output:** Returns a JSON string representation of the array of entities that were successfully created.
-
-### `create_relations`
-
--   **Purpose:** Creates one or more new relations between existing entities. Duplicate relations are ignored.
--   **Arguments:**
-    ```json
-    {
-      "relations": [ ]
-    }
-    ```
--   **Output:** Returns a JSON string representation of the array of relations that were successfully created.
-
-### `add_observations`
-
--   **Purpose:** Adds observations to existing entities. Fails if the target entity doesn't exist. Assigns unique IDs if missing. Ignores observations with duplicate IDs for the same entity.
--   **Arguments:**
-    ```json
-    {
-      "observationsInput": [
+      "entities": [
         {
-          "entityName": "string", 
-          "observationsToAdd": [ ]
+          "name": "string",
+          "entityType": "string",
+          "observations": ["string", "another observation"]
         }
+        // ... more entities
       ]
     }
     ```
--   **Output:** Returns a JSON string representation of results, showing added observations per entity.
+-   **Output:** Returns a JSON string representation of the array of entities that were newly created. (Existing entities with the same name are not re-created or returned here). Example: `[{"name":"NewEntity","entityType":"Type","observations":["obs1"]}]`
+
+### `create_relations`
+
+-   **Purpose:** Creates one or more new relations (each defined by `from`, `to`, `relationType`) between existing entities. The `KnowledgeGraphManager` ignores attempts to create relations that are exact duplicates of existing ones.
+-   **Arguments:** (Matches the `inputSchema` in `src/server.ts`)
+    ```json
+    {
+      "relations": [
+        {
+          "from": "entityName1",
+          "to": "entityName2",
+          "relationType": "RELATES_TO"
+        }
+        // ... more relations
+      ]
+    }
+    ```
+-   **Output:** Returns a JSON string representation of the array of relations that were newly created. Example: `[{"from":"EntityA","to":"EntityB","relationType":"CALLS"}]`
+
+### `add_observations`
+
+-   **Purpose:** Adds new string observations to the `observations` array of existing entities. The tool will fail if the target entity does not exist. It only adds observation strings that are not already present in the entity's `observations` array to avoid duplicates.
+-   **Arguments:** (Matches the `inputSchema` in `src/server.ts`)
+    ```json
+    {
+      "observations": [ // Note: argument name is "observations"
+        {
+          "entityName": "string",
+          "contents": ["string observation 1", "string observation 2"] // Note: field name is "contents"
+        }
+        // ... more entities to add observations to
+      ]
+    }
+    ```
+-   **Output:** Returns a JSON string representation of an array, where each element indicates the entity and the specific string observations that were successfully added to it. Example: `[{"entityName":"MyEntity","addedObservations":["new observation string"]}]`
 
 ### `delete_entities`
 
@@ -162,20 +136,20 @@ The server exposes the following tools via the Model Context Protocol (MCP). The
 
 ### `delete_observations`
 
--   **Purpose:** Removes specific observations by ID from entities.
--   **Arguments:**
+-   **Purpose:** Removes specific string observations from an entity's `observations` array. It matches based on the exact string content.
+-   **Arguments:** (Matches the `inputSchema` in `src/server.ts`)
     ```json
     {
       "deletions": [
         {
           "entityName": "string",
-          "observationIds": [ "string"]
+          "observations": ["string content to delete", "another string to delete"] // Note: field name is "observations"
         }
-
+        // ... more entities to delete observations from
       ]
     }
     ```
--   **Output:** Confirmation message.
+-   **Output:** Returns a confirmation message like: `"Observations deleted successfully"`.
 
 ### `delete_relations`
 
@@ -198,7 +172,7 @@ The server exposes the following tools via the Model Context Protocol (MCP). The
 
 ### `search_nodes`
 
--   **Purpose:** Searches entities based on a query string (checks names, types, observations, metadata, etc.).
+-   **Purpose:** Searches entities based on a query string. The current implementation in `src/server.ts` performs a case-insensitive search that checks the entity's `name`, `entityType`, and the content of its string `observations`. It does not search metadata fields, as these are not part of the core `Entity` structure.
 -   **Arguments:**
     ```json
     {
@@ -220,11 +194,11 @@ The server exposes the following tools via the Model Context Protocol (MCP). The
 
 ## Usage Examples
 
-Here are examples showing the `arguments` part of an MCP `CallToolRequest` for common operations:
+Here are examples showing the `arguments` part of an MCP `CallToolRequest` for common operations, updated to reflect the `src/server.ts` implementation:
 
 ### 1. Creating a Project Entity
 
-Use `create_entities` with `entityType: 'project'`:
+Use `create_entities`. Project-specific details are stored as strings in the `observations` array.
 
 ```json
 {
@@ -232,11 +206,13 @@ Use `create_entities` with `entityType: 'project'`:
     {
       "name": "my-awesome-library",
       "entityType": "project",
-      "description": "A library for doing awesome things.",
-      "technologies": ["TypeScript", "Node.js"],
-      "architectureStyle": "Monolith",
-      "repositoryUrl": "https://github.com/user/my-awesome-library",
-      "observations": [] 
+      "observations": [
+        "description: A library for doing awesome things.",
+        "technology: TypeScript",
+        "technology: Node.js",
+        "architectureStyle: Monolith",
+        "repositoryUrl: https://github.com/user/my-awesome-library"
+      ]
     }
   ]
 }
@@ -244,7 +220,7 @@ Use `create_entities` with `entityType: 'project'`:
 
 ### 2. Creating a Function Entity
 
-Use `create_entities` with `entityType: 'function'`:
+Use `create_entities`. Function-specific details are stored as strings in the `observations` array.
 
 ```json
 {
@@ -252,107 +228,44 @@ Use `create_entities` with `entityType: 'function'`:
     {
         "name": "calculateTotalAmount(items)",
         "entityType": "function",
-        "language": "javascript",
-        "filePath": "src/utils/calculations.js",
-        "startLine": 25,
-        "endLine": 40,
-        "signature": "(items: Item[]): number",
-        "summary": "Calculates the total amount based on a list of items.",
-        "accessModifier": "public",
-        "isAsync": false,
-        "observations": [],
-        "tags": ["core-logic", "billing"]
+        "observations": [
+          "language: javascript",
+          "filePath: src/utils/calculations.js",
+          "startLine: 25",
+          "endLine: 40",
+          "signature: (items: Item[]): number",
+          "summary: Calculates the total amount based on a list of items.",
+          "accessModifier: public",
+          "isAsync: false",
+          "tag: core-logic",
+          "tag: billing"
+        ]
     }
   ]
 }
 ```
 
-### 3. Adding a Design Decision Observation
+### 3. Adding String Observations
 
-Use `add_observations`. Note the structure: `observationsInput` is an array, containing objects for each entity being updated. Each object specifies `entityName` and an `observationsToAdd` array.
+Use the `add_observations` tool. Remember the argument is `observations` (an array of objects), and each object has `entityName` and `contents` (an array of strings to add).
 
 ```json
 {
-  "observationsInput": [
+  "observations": [
     {
-      "entityName": "MyCoreClass", 
-      "observationsToAdd": [
-        {
-          "observationType": "design_decision",
-          "content": "Decided to use Strategy pattern for handling different output formats.",
-          "source": "architect_meeting_notes_2023-10-27",
-          "author": "Alice",
-          "timestamp": "2023-10-27T10:00:00Z",
-          "metadata": {
-            "rationale": "Provides flexibility to add new formats without modifying the core class.",
-            "alternativesConsidered": ["Factory Method", "Simple if/else"],
-            "decisionMaker": "Bob",
-            "relatedIssue": "PROJ-123"
-          }
-        }
+      "entityName": "MyCoreClass",
+      "contents": [
+        "Design Decision: Use Strategy pattern for output formats. Rationale: Flexibility. Alternatives: Factory Method, if/else. By: Bob. Ref: PROJ-123. (Source: architect_meeting_notes_2023-10-27, Alice, 2023-10-27T10:00:00Z)",
+        "Another observation for MyCoreClass"
       ]
     }
   ]
 }
 ```
 
-### 4. Adding a Design Pattern Usage Observation
+### 4. Creating a Relation
 
-Use `add_observations`:
-
-```json
-{
-  "observationsInput": [
-    {
-      "entityName": "ConfigurationManager", 
-      "observationsToAdd": [
-        {
-          "observationType": "design_pattern_use",
-          "content": "Implemented as a Singleton to ensure single point of access to configuration.",
-          "source": "code_review_comment_456",
-          "author": "Charlie",
-          "metadata": {
-            "patternName": "Singleton",
-            "role": "unique_instance"
-          }
-        }
-      ]
-    }
-  ]
-}
-```
-
-### 5. Adding a Change Rationale Observation
-
-Use `add_observations`:
-
-```json
-{
-  "observationsInput": [
-    {
-      "entityName": "calculateTotalAmount(items)", 
-      "observationsToAdd": [
-        {
-          "observationType": "change_rationale",
-          "content": "Refactored calculation logic for improved performance.",
-          "source": "git_commit_a1b2c3d4", 
-          "author": "David",
-          "timestamp": "2023-10-26T15:30:00Z",
-          "metadata": {
-            "commitHash": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
-            "relatedIssue": "PERF-45",
-            "summaryOfChange": "Replaced loop with vectorized operation."
-          }
-        }
-      ]
-    }
-  ]
-}
-```
-
-### 6. Creating a Relation
-
-Use `create_relations` to link two existing entities (e.g., `OrderProcessor` calls `calculateTotalAmount`):
+Use `create_relations` to link two existing entities. The relation structure is simple (`from`, `to`, `relationType`).
 
 ```json
 {
@@ -360,9 +273,7 @@ Use `create_relations` to link two existing entities (e.g., `OrderProcessor` cal
     {
         "from": "OrderProcessor.process()", 
         "to": "calculateTotalAmount(items)", 
-        "relationType": "CALLS",
-        "filePath": "src/services/OrderProcessor.js",
-        "line": 88
+        "relationType": "CALLS"
     }
   ]
 }
